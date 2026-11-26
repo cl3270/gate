@@ -1,11 +1,11 @@
 name: VPN Gate Node Check
 
-# 定时任务已启用：每 30 分钟跑一次。
+# 定时任务已启用：每天 UTC 00:00（北京时间 08:00）跑一次。
 # 注意：GitHub 调度最小间隔约 5 分钟，但通常会延迟几分钟。
 # 「仓库连续 60 天无提交 → 定时任务被自动停用」这个问题由下面的 Keepalive 步骤自动处理（每 25 天补一次提交）。
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       max_nodes:
@@ -120,7 +120,7 @@ jobs:
         run: python vpngate.py
 
       # 把生成的 nodes.txt 自动写进 edgetunnel 的 KV（key = ADD.txt），
-      # 这样 edgetunnel 后台的节点列表每 30 分钟自动跟着刷新，不用手工粘贴。
+      # 这样 edgetunnel 后台的节点列表每天自动跟着刷新，不用手工粘贴。
       # 需要仓库 Secret：CF_API_TOKEN（Workers KV Storage 读写权限即可）。
       - name: Sync nodes to Cloudflare KV
         env:
