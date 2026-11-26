@@ -1,13 +1,10 @@
 name: VPN Gate Node Check
 
-# 模板仓库默认不配置定时任务：需要自动更新时，把下面的注释替换成你自己的 cron。
+# 定时任务已启用：每 30 分钟跑一次。
 # 注意：GitHub 调度最小间隔约 5 分钟，但通常会延迟几分钟；仓库连续 60 天无提交会让定时任务自动停用。
-#
-# on:
-#   schedule:
-#     - cron: '*/30 * * * *'
-
 on:
+  schedule:
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       max_nodes:
@@ -70,6 +67,54 @@ jobs:
           MAX_CHECK_NODES: ${{ github.event.inputs.max_nodes || '0' }}
           MIN_SUCCESS_RATIO: '0'
         run: python vpngate.py
+
+      # 把生成的 nodes.txt 自动写进 edgetunnel 的 KV（key = ADD.txt），
+      # 这样 edgetunnel 后台的节点列表每 30 分钟自动跟着刷新，不用手工粘贴。
+      # 需要仓库 Secret：CF_API_TOKEN（Workers KV Storage 读写权限即可）。
+      - name: Sync nodes to Cloudflare KV
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: b83d13db09c3e00fe1e28e0956b3f93d
+          CF_KV_NAMESPACE_ID: 9930619d978147d5a597b8bc6403fb53
+          KV_KEY: ADD.txt
+        run: |
+          set -u
+          if [ -z "${CF_API_TOKEN}" ]; then
+            echo "::warning::未配置 CF_API_TOKEN，跳过 KV 同步（GitHub Pages 仍会正常更新）"
+            exit 0
+          fi
+
+          src=public/nodes.txt
+          if [ ! -s "$src" ]; then
+            echo "::error::$src 不存在或为空，拒绝覆盖 KV"
+            exit 1
+          fi
+
+          lines=$(grep -cve '^[[:space:]]*$' "$src" || true)
+          if [ "${lines:-0}" -lt 1 ]; then
+            echo "::error::nodes.txt 没有有效行，拒绝覆盖 KV"
+            exit 1
+          fi
+
+          echo "准备写入 KV：${lines} 行 → ${KV_KEY}"
+          code=$(curl -sS -o /tmp/kv.json -w '%{http_code}' -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_KV_NAMESPACE_ID}/values/${KV_KEY}" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: text/plain" \
+            --data-binary @"$src")
+
+          echo "PUT KV -> HTTP ${code}"
+          cat /tmp/kv.json || true
+
+          case "$code" in
+            200|201|204)
+              echo "KV 同步成功（${lines} 行）"
+              ;;
+            *)
+              echo "::error::KV 同步失败（HTTP ${code}），请检查 CF_API_TOKEN 是否有效、是否含 Workers KV Storage Write 权限"
+              exit 1
+              ;;
+          esac
 
       - name: Ensure GitHub Pages is enabled
         env:
