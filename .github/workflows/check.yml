@@ -1,7 +1,8 @@
 name: VPN Gate Node Check
 
 # 定时任务已启用：每 30 分钟跑一次。
-# 注意：GitHub 调度最小间隔约 5 分钟，但通常会延迟几分钟；仓库连续 60 天无提交会让定时任务自动停用。
+# 注意：GitHub 调度最小间隔约 5 分钟，但通常会延迟几分钟。
+# 「仓库连续 60 天无提交 → 定时任务被自动停用」这个问题由下面的 Keepalive 步骤自动处理（每 25 天补一次提交）。
 on:
   schedule:
     - cron: '*/30 * * * *'
@@ -21,7 +22,7 @@ on:
         default: '25'
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -39,6 +40,56 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # GitHub 在仓库连续 60 天没有任何提交时会自动停用定时任务。
+      # 这里每 25 天（最多）自动向 .keepalive 写一次日期并提交，把「仓库活跃度」续上，
+      # 实现真正无人值守；推送失败也只是 warning，不影响节点更新与发布。
+      - name: Keepalive commit
+        shell: bash
+        run: |
+          set -uo pipefail
+          file=".keepalive"
+          today=$(date -u +%Y-%m-%d)
+          last=""
+          if [ -f "$file" ]; then
+            last=$(tr -d '[:space:]' < "$file" || true)
+          fi
+
+          if [ -n "$last" ]; then
+            last_ts=$(date -u -d "$last" +%s 2>/dev/null || echo 0)
+            if [ "${last_ts:-0}" -gt 0 ]; then
+              age=$(( $(date -u +%s) - last_ts ))
+              if [ "$age" -lt 2160000 ]; then
+                echo "上次 keepalive：${last}（$((age / 86400)) 天前），未到 25 天，跳过"
+                exit 0
+              fi
+            fi
+          fi
+
+          echo "$today" > "$file"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+
+          if git diff --cached --quiet; then
+            echo "keepalive 内容无变化，跳过提交"
+            exit 0
+          fi
+
+          git commit -m "chore: keepalive ${today}（防定时任务被自动停用）"
+
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "keepalive 已提交：${today}"
+              exit 0
+            fi
+            echo "第 ${attempt} 次推送失败，尝试 rebase 后重试"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            sleep 3
+          done
+
+          echo "::warning::keepalive 推送失败，本次跳过（不影响节点更新）"
+          exit 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
